@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
   <head>
     <meta charset="utf-8" />
@@ -6,16 +6,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!-- A-Frame 本体 -->
     <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <!-- A-Frame Physics System -->
+    <script src="https://cdn.jsdelivr.net/npm/@c-frame/aframe-physics-system@4.2.3/dist/aframe-physics-system.min.js"></script>
 
     <!-- 車を赤に塗る・汎用コンポーネント -->
     <script>
       // 使い方: <a-entity gltf-model="#carModel" recolor="color: #e60033; removeTex: true"></a-entity>
       AFRAME.registerComponent('recolor', {
         schema: {
-          color: { default: '#ff0000' },   // 目標色
-          only: { default: '' },           // 名前にこの文字列を含むメッシュだけを対象（空なら全て）
-          exclude: { default: '' },        // 逆に除外したいメッシュ名の一部
-          removeTex: { default: true }     // テクスチャを無効化（true推奨：純色にする）
+          color: { default: '#ff0000' }, // 目標色
+          only: { default: '' }, // 名前にこの文字列を含むメッシュだけを対象（空なら全て）
+          exclude: { default: '' }, // 逆に除外したいメッシュ名の一部
+          removeTex: { default: true }, // テクスチャを無効化（true推奨：純色にする）
         },
         init() {
           this.el.addEventListener('model-loaded', () => {
@@ -23,7 +25,7 @@
             if (!mesh) return;
             mesh.traverse((o) => {
               if (!o.isMesh || !o.material) return;
-              const name = (o.name || o.material.name || '');
+              const name = o.name || o.material.name || '';
               if (this.data.only && !name.includes(this.data.only)) return;
               if (this.data.exclude && name.includes(this.data.exclude)) return;
               // 純色にしたい場合はテクスチャを外す（map が残ると色が乗っても見た目が変わりにくい）
@@ -38,15 +40,23 @@
               o.material.needsUpdate = true;
             });
           });
-        }
+        },
       });
     </script>
   </head>
   <body>
-    <a-scene>
+    <!-- E-Stop ボタン -->
+    <button id="eStopButton" style="position: absolute; top: 10px; right: 10px; z-index: 1000">
+      E-Stop
+    </button>
+
+    <a-scene physics="driver: local; debug: true; gravity: -9.8">
       <!-- アセット（車モデル） -->
       <a-assets>
-        <a-asset-item id="carModel" src="assets/kenney_car-kit/Models/GLB format/sedan.glb"></a-asset-item>
+        <a-asset-item
+          id="carModel"
+          src="assets/kenney_car-kit/Models/GLB format/sedan.glb"
+        ></a-asset-item>
       </a-assets>
 
       <!-- ライト（真っ黒対策） -->
@@ -57,16 +67,47 @@
       <a-entity camera look-controls wasd-controls position="0 1.6 4"></a-entity>
 
       <!-- 地面と空 -->
-      <a-plane rotation="-90 0 0" width="50" height="50" color="#cccccc"></a-plane>
+      <a-plane
+        rotation="-90 0 0"
+        width="50"
+        height="50"
+        color="#cccccc"
+        static-body="shape: plane"
+      ></a-plane>
       <a-sky color="#ECECEC"></a-sky>
 
       <!-- 車本体：ここで recolor を指定（#e60033 は少し深い赤） -->
-      <a-entity id="car"
+      <a-entity
+        id="car"
         gltf-model="#carModel"
-        position="0 0 -4"
+        position="0 3 -4"
         rotation="0 180 0"
         scale="1 1 1"
-      </a-entity>
+      ></a-entity>
     </a-scene>
+
+    <script>
+      // 車モデルのロード後に dynamic-body を設定
+      document.querySelector('#car').addEventListener('model-loaded', (event) => {
+        const car = event.target;
+        car.setAttribute(
+          'dynamic-body',
+          'shape: box; mass: 120; linearDamping: 0.4; angularDamping: 0.9; type: dynamic'
+        );
+        car.addEventListener('body-loaded', () => {
+          console.log('car body:', car.body);
+        });
+      });
+
+      // E-Stop ボタンのクリックイベント
+      document.getElementById('eStopButton').addEventListener('click', () => {
+        const car = document.querySelector('#car');
+        const body = car.components['dynamic-body'];
+        if (body) {
+          body.body.velocity.set(0, 0, 0);
+          body.body.angularVelocity.set(0, 0, 0);
+        }
+      });
+    </script>
   </body>
 </html>
