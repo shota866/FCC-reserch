@@ -9,101 +9,143 @@
     <!-- A-Frame Physics System (cannon-es) -->
     <script src="https://cdn.jsdelivr.net/npm/@c-frame/aframe-physics-system@4.2.3/dist/aframe-physics-system.min.js"></script>
 
-    
-
-    <!-- 車を“物理的に”走らせる（W/S/A/D）。推力方向はThreeのworldDirectionで安定化。 -->
+    <!-- 車を物理で走らせる（W/S/A/D） -->
     <script>
       AFRAME.registerComponent('car-drive', {
-        schema: { thrust:{default:1500}, turn:{default:1.2}, maxSpeed:{default:12}, drag:{default:0.6} },
+        schema: {
+          thrust: { default: 1800 },
+          turn: { default: 1.2 },
+          maxSpeed: { default: 16 },
+          drag: { default: 0.4 },
+        },
         init() {
           this.keys = {};
-          const down = (e)=>{ const k = e.code || (e.key && ('Key'+e.key.toUpperCase())); this.keys[k]=true; };
-          const up   = (e)=>{ const k = e.code || (e.key && ('Key'+e.key.toUpperCase())); this.keys[k]=false; };
+          const down = (e) => {
+            const k = e.code || (e.key && 'Key' + e.key.toUpperCase());
+            this.keys[k] = true;
+          };
+          const up = (e) => {
+            const k = e.code || (e.key && 'Key' + e.key.toUpperCase());
+            this.keys[k] = false;
+          };
+          // 取りこぼし低減（capture）
           window.addEventListener('keydown', down, true);
-          window.addEventListener('keyup',   up,   true);
+          window.addEventListener('keyup', up, true);
           document.addEventListener('keydown', down, true);
-          document.addEventListener('keyup',   up,   true);
+          document.addEventListener('keyup', up, true);
+          // フォーカス喪失でキー状態をクリア
+          window.addEventListener(
+            'blur',
+            () => {
+              this.keys = {};
+            },
+            true
+          );
+
           this.tmpForce = new CANNON.Vec3();
           this.dir3 = new THREE.Vector3();
+          this.q = new THREE.Quaternion();
         },
         tick(t, dtms) {
-          const body = this.el.body; if (!body) return;
-          const dt = Math.min(dtms/1000, 0.05);
+          const body = this.el.body;
+          if (!body) return;
+          const dt = Math.min(dtms / 1000, 0.05);
 
-          if (this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD']) body.wakeUp();
+          // 入力があればスリープ解除
+          if (this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD'])
+            body.wakeUp();
 
-          const fwdSign = (this.keys['KeyW']?1:0) - (this.keys['KeyS']?1:0);
-          const yawSign = (this.keys['KeyD']?1:0) - (this.keys['KeyA']?1:0);
+          const fwdSign = (this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0);
+          const yawSign = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
           const speed = body.velocity.length();
 
-          // 前進・後退の推力（ローカル −Z の世界向きをThreeから取得）
+          // 前進・後退（前＝ローカル −Z をクォータニオンから算出）
           if (fwdSign !== 0 && speed < this.data.maxSpeed + 0.5) {
-            this.el.object3D.getWorldDirection(this.dir3); // ローカル −Z の世界方向（正規化）
+            this.el.object3D.getWorldQuaternion(this.q);
+            // ローカル −Z を世界へ。水平面に投影して微小の上下成分は無視してもよい
+            this.dir3.set(0, 0, -1).applyQuaternion(this.q);
+            this.dir3.set(this.dir3.x, 0, this.dir3.z).normalize();
             this.tmpForce.set(this.dir3.x, this.dir3.y, this.dir3.z);
             this.tmpForce.scale(this.data.thrust * fwdSign, this.tmpForce);
-            body.applyForce(this.tmpForce, body.position);
+            body.applyForce(this.tmpForce, body.position); // 作用点＝質量中心
           }
 
-          // 旋回（ヨー角速度）。D=時計回り、A=反時計回りになるよう符号を反転。
+          // 旋回（ヨー）。D=右（時計回り）が負、A=左（反時計回り）が正
           body.angularVelocity.y = -this.data.turn * yawSign;
 
-          // 抗力：F = -k * v
+          // 抗力：F = -k v
           this.tmpForce.set(body.velocity.x, body.velocity.y, body.velocity.z);
           this.tmpForce.scale(-this.data.drag, this.tmpForce);
           body.applyForce(this.tmpForce, body.position);
-        }
+        },
       });
     </script>
 
-    <!-- 追従カメラ：scale非依存（world quaternionで前/上方向を算出）。nearを小さくして近クリップ回避。 -->
+    <!-- 追従カメラ：後方固定 + 世界Y+で安定化 + 車自身を注視 -->
     <script>
       AFRAME.registerComponent('chase-camera', {
         schema: {
-          target: { type:'selector' },
-          dist: { default: 12 },     // 後方距離（m）
-          height: { default: 3.5 },  // 高さ（m）
-          stiffness: { default: 4 }, // 追従の速さ
-          lookAhead: { default: 3 }  // 前方視点の先（m）
+          target: { type: 'selector' },
+          dist: { default: 9 },
+          height: { default: 5.5 },
+          stiffness: { default: 4 },
+          lookAhead: { default: 0 },
         },
         init() {
           this.pos = new THREE.Vector3();
-          this.q   = new THREE.Quatern ion();
+          this.q = new THREE.Quaternion();
           this.fwd = new THREE.Vector3();
-          this.up  = new THREE.Vector3();
+          this.back = new THREE.Vector3();
+          this.up = new THREE.Vector3();
           this.des = new THREE.Vector3();
-          this.look= new THREE.Vector3();
+          this.look = new THREE.Vector3();
         },
         tick(t, dtms) {
-          const tgt = this.data.target && this.data.target.object3D; if (!tgt) return;
+          const tgt = this.data.target && this.data.target.object3D;
+          if (!tgt) return;
           tgt.getWorldPosition(this.pos);
           tgt.getWorldQuaternion(this.q);
 
-          // ローカル軸→世界向き（回転のみ。スケール影響なし）
-          const fwd = this.fwd.set(0,0,-1).applyQuaternion(this.q); // 前（−Z）
-          const up  = this.up .set(0,1, 0).applyQuaternion(this.q); // 上（+Y）
+          const fwd = this.fwd.set(0, 0, -1).applyQuaternion(this.q).normalize();
+          const back = this.back.copy(fwd).negate();
+          const up = this.up.set(0, 1, 0); // 世界Y+
 
-          // 目標位置＝車 + up*height + 後ろ*dist
-          this.des.copy(this.pos)
-            .addScaledVector(up,  this.data.height)
-            .addScaledVector(fwd, -this.data.dist);
+          this.des
+            .copy(this.pos)
+            .addScaledVector(up, this.data.height)
+            .addScaledVector(back, this.data.dist);
 
-          // 注視点＝車 + up*0.5 + 前*lookAhead
-          this.look.copy(this.pos)
-            .addScaledVector(up, 0.5)
+          this.look
+            .copy(this.pos)
+            .addScaledVector(up, 0.6) // まずは車そのもの
             .addScaledVector(fwd, this.data.lookAhead);
 
-          // スムーズ追従＆注視
-          const dt = Math.min(dtms/1000, 0.05);
+          const dt = Math.min(dtms / 1000, 0.05);
           const alpha = 1 - Math.exp(-this.data.stiffness * dt);
           this.el.object3D.position.lerp(this.des, alpha);
-          this.el.object3D.lookAt(this.look);
-        }
+
+          const camObj = this.el.getObject3D('camera') || this.el.object3D;
+          camObj.up.set(0, 1, 0);
+          camObj.lookAt(this.look);
+        },
       });
     </script>
 
     <style>
-      #eStopButton{position:absolute;top:10px;right:10px;z-index:1000}
-      #logHint{position:absolute;top:50px;right:10px;z-index:1000;font:12px/1.3 monospace;opacity:.6}
+      #eStopButton {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        z-index: 1000;
+      }
+      #logHint {
+        position: absolute;
+        top: 50px;
+        right: 10px;
+        z-index: 1000;
+        font: 12px/1.3 monospace;
+        opacity: 0.6;
+      }
     </style>
   </head>
 
@@ -115,83 +157,128 @@
     <a-scene physics="driver: local; debug: true; gravity: -9.8">
       <!-- アセット -->
       <a-assets>
-        <a-asset-item id="carModel" src="assets/kenney_car-kit/Models/GLB format/sedan.glb"></a-asset-item>
+        <a-asset-item
+          id="carModel"
+          src="assets/kenney_car-kit/Models/GLB format/sedan.glb"
+        ></a-asset-item>
       </a-assets>
 
       <!-- ライティング -->
       <a-entity light="type: ambient; intensity: 0.6"></a-entity>
       <a-entity light="type: directional; intensity: 1.0" position="1 3 2"></a-entity>
 
-      <!-- 追従カメラ（nearを小さく、scale非依存chase） -->
-      <a-entity id="chasecam"
-        camera="active: true; near: 0.01; far: 2000"
+      <!-- 追従カメラ（fov広め、look-controls無効） -->
+      <a-entity
+        id="chasecam"
+        camera="active: true; near: 0.01; far: 2000; fov: 90"
         look-controls="enabled: false"
-        chase-camera="target: #car; dist: 12; height: 3.5; stiffness: 4; lookAhead: 3">
+        chase-camera="target: #car; dist: 5; height: 3.5; stiffness: 4; lookAhead: 0"
+      >
       </a-entity>
 
       <!-- デバッグカメラ（Cで切替） -->
-      <a-entity id="debugcam" camera="active: false" look-controls wasd-controls position="0 1.6 8"></a-entity>
+      <a-entity
+        id="debugcam"
+        camera="active: false"
+        look-controls
+        wasd-controls
+        position="0 1.6 8"
+      ></a-entity>
 
       <!-- 地面 & 空 -->
-      <a-plane rotation="-90 0 0" width="80" height="80" color="#cccccc" static-body="shape: plane"></a-plane>
+      <a-plane
+        rotation="-90 0 0"
+        width="80"
+        height="80"
+        color="#cccccc"
+        static-body="shape: plane"
+      ></a-plane>
       <a-sky color="#ECECEC"></a-sky>
 
-      <!-- 車（ラッパー＝物理主体 / 子＝見た目。scaleは子側だけに適用） -->
-      <a-entity id="car"
-        position="0 3dw -4"
-        rotation="0 180 0"
-        dynamic-body="shape: box; mass: 120; linearDamping: 0.4; angularDamping: 0.9; type: dynamic">
-        <a-entity id="carModelNode"
+      <!-- 車（ラッパー＝物理主体 / 子＝見た目） -->
+      <a-entity
+        id="car"
+        position="0 1.0 -4"
+        rotation="0 0 0"
+        dynamic-body="shape: box; mass: 120; linearDamping: 0.4; angularDamping: 0.9; type: dynamic"
+        car-drive="thrust:1800; drag:0.4; turn:1.2; maxSpeed:16"
+      >
+        <a-entity
+          id="carModelNode"
+          rotation="0 180 0"
           gltf-model="#carModel"
           scale="0.5 0.5 0.5"
-          <!-- recolor を使うなら次行のコメントを外す -->
-          <!-- recolor="color:#c00; removeTex:true" -->
         ></a-entity>
       </a-entity>
     </a-scene>
 
     <script>
+      // シーン読み込み完了後に canvas フォーカス設定（AFRAME.scenes[0] 未定義エラー対策）
+      document.addEventListener('DOMContentLoaded', () => {
+        const sceneEl = document.querySelector('a-scene');
+        if (!sceneEl) return;
+        sceneEl.addEventListener('loaded', () => {
+          const canvas = sceneEl.canvas;
+          if (!canvas) return;
+          canvas.setAttribute('tabindex', '0');
+          canvas.addEventListener('click', () => canvas.focus());
+          setTimeout(() => canvas.focus(), 0);
+        });
+      });
+
       // ログ & 初期化
       const carEl = document.querySelector('#car');
       const modelEl = document.querySelector('#carModelNode');
 
       modelEl.addEventListener('model-loaded', (e) => console.log('[OK] model loaded:', e.detail));
-      modelEl.addEventListener('model-error',  (e) => console.error('[ERR] model:', e.detail?.src, e.detail?.error));
+      modelEl.addEventListener('model-error', (e) =>
+        console.error('[ERR] model:', e.detail?.src, e.detail?.error)
+      );
 
-      carEl.addEventListener('body-loaded', () => {
-        console.log('[OK] body created:', carEl.body);
-        carEl.body.allowSleep = false;
-        if (!carEl.getAttribute('car-drive')) {
-          // 一旦強めの値にして切り分けしやすく
-          carEl.setAttribute('car-drive', 'thrust:1800; drag:0.4; turn:1.2; maxSpeed:16');
-        }
-      }, { once:true });
+      carEl.addEventListener(
+        'body-loaded',
+        () => {
+          console.log('[OK] body created:', carEl.body);
+          carEl.body.allowSleep = false;
+        },
+        { once: true }
+      );
 
       // E-Stop
       document.getElementById('eStopButton').addEventListener('click', (e) => {
         const body = carEl.components['dynamic-body']?.body;
-        if (body) { body.velocity.set(0,0,0); body.angularVelocity.set(0,0,0); }
+        if (body) {
+          body.velocity.set(0, 0, 0);
+          body.angularVelocity.set(0, 0, 0);
+        }
         e.target.blur();
       });
 
       // C: 追従 <-> デバッグ カメラ切替
-      window.addEventListener('keydown', (e) => {
-        if (e.code !== 'KeyC') return;
-        const chase = document.querySelector('#chasecam');
-        const debug = document.querySelector('#debugcam');
-        const useDebug = !debug.getAttribute('camera').active;
-        debug.setAttribute('camera', 'active:' + useDebug);
-        chase.setAttribute('camera', 'active:' + !useDebug);
-        console.log('camera:', useDebug ? 'debug' : 'chase');
-      }, true);
+      window.addEventListener(
+        'keydown',
+        (e) => {
+          if (e.code !== 'KeyC') return;
+          const chase = document.querySelector('#chasecam');
+          const debug = document.querySelector('#debugcam');
+          const useDebug = !debug.getAttribute('camera').active;
+          debug.setAttribute('camera', 'active:' + useDebug);
+          chase.setAttribute('camera', 'active:' + !useDebug);
+          console.log('camera:', useDebug ? 'debug' : 'chase');
+        },
+        true
+      );
 
       // L: 車と追従カメラの位置を1回だけログ
-      function onKeyOnce(e){
+      function onKeyOnce(e) {
         if (e.code !== 'KeyL') return;
         window.removeEventListener('keydown', onKeyOnce, true);
-        const carO3 = carEl.object3D, camO3 = document.querySelector('#chasecam').object3D;
-        const pCar=new THREE.Vector3(), pCam=new THREE.Vector3();
-        carO3.getWorldPosition(pCar); camO3.getWorldPosition(pCam);
+        const carO3 = carEl.object3D,
+          camO3 = document.querySelector('#chasecam').object3D;
+        const pCar = new THREE.Vector3(),
+          pCam = new THREE.Vector3();
+        carO3.getWorldPosition(pCar);
+        camO3.getWorldPosition(pCam);
         console.log('[L] car:', pCar, ' cam:', pCam, ' dist(m):', pCar.distanceTo(pCam).toFixed(3));
       }
       window.addEventListener('keydown', onKeyOnce, true);
