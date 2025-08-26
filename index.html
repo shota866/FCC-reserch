@@ -2,101 +2,270 @@
 <html lang="ja">
   <head>
     <meta charset="utf-8" />
-    <title>A-Frame Car + Follow Cam (Fixed)</title>
+    <title>A-Frame Car + Follow Cam (Arcade + Friction)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!-- A-Frame -->
     <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
     <!-- A-Frame Physics System (cannon-es) -->
     <script src="https://cdn.jsdelivr.net/npm/@c-frame/aframe-physics-system@4.2.3/dist/aframe-physics-system.min.js"></script>
 
-    <!-- 車を物理で走らせる（W/S/A/D） -->
+    <!-- ▼ 一元パラメータ（ここだけ触ればOK） ▼ -->
+    <script>
+      window.PARAMS = {
+        scene: {
+          driver: 'local', // 物理ドライバ
+          debug: true, // 物理デバッグ描画
+          gravity: -9.8, // 重力加速度（下向きが負）
+        },
+        body: {
+          shape: 'box', // 衝突形状
+          type: 'dynamic', // 動的剛体
+          mass: 120, // 車体質量[kg]
+          linearDamping: 0.1, // 並進減衰（惰性を少し残す）
+          angularDamping: 1.0, // 角減衰（Yawは自前制御なので大きめでOK）
+        },
+        // —— アーケード式ドライブ（速度vと角速度ωを直接制御） ——
+        carDrive: {
+          forwardSign: +1, // ローカル前方の向き：+1=+Zが前 / -1=−Zが前
+          // ※W/Sが逆なら ここを -1 にするだけで直ります
+          maxSpeed: 25, // 最高速[m/s]
+          accel: 3, // 加速[m/s^2]（W）
+          brake: 4, // 後退方向の加速/ブレーキ[m/s^2]（S）
+          coastDecel: 0.05, // 惰性減速[m/s^2]（使わない場合は0。下の摩擦で止めます）
+          yawRate: 3.2, // 押しっぱなし時の角速度[rad/s]（A左+, D右-）
+          yawSlew: 40, // 角速度の変化上限[rad/s^2]（大きいほど即応）
+          deadbandV: 0.05, // 極低速を0に丸める[m/s]
+          deadbandW: 0.02, // 極小角速度を0に丸める[rad/s]
+
+          // —— 抵抗モデル（床と空気） ——
+          muRoll: 0.1, // 転がり抵抗係数（床摩擦）。減速度 ≒ muRoll*g
+          airLin: 0.1, // 線形空気抵抗の係数 [1/s]（速度に比例）
+          airQuad: 0.1, // 二乗空気抵抗の係数 [1/m]（速度²に比例）
+        },
+        chaseCam: {
+          dist: -3, // 車の背後(−) / 前方(＋)
+          height: 3.5, // 見下ろし高さ
+          stiffness: 12, // 追従速さ
+          lookAhead: 0.45, // 先読み距離
+        },
+        angularFactor: { x: 0, y: 1, z: 0 }, // ピッチ/ロール拘束, ヨーのみ許可
+      };
+
+      function applyParams() {
+        const P = window.PARAMS;
+        const scene = document.querySelector('a-scene');
+        if (scene) {
+          scene.setAttribute(
+            'physics',
+            `driver: ${P.scene.driver}; debug: ${P.scene.debug}; gravity: ${P.scene.gravity}`
+          );
+        }
+        const car = document.querySelector('#car');
+        if (car) {
+          car.setAttribute(
+            'dynamic-body',
+            `shape: ${P.body.shape}; mass: ${P.body.mass}; linearDamping: ${P.body.linearDamping}; angularDamping: ${P.body.angularDamping}; type: ${P.body.type}`
+          );
+          car.setAttribute(
+            'car-drive',
+            `forwardSign:${P.carDrive.forwardSign}; maxSpeed:${P.carDrive.maxSpeed}; accel:${P.carDrive.accel}; brake:${P.carDrive.brake}; coastDecel:${P.carDrive.coastDecel}; ` +
+              `yawRate:${P.carDrive.yawRate}; yawSlew:${P.carDrive.yawSlew}; deadbandV:${P.carDrive.deadbandV}; deadbandW:${P.carDrive.deadbandW}; ` +
+              `muRoll:${P.carDrive.muRoll}; airLin:${P.carDrive.airLin}; airQuad:${P.carDrive.airQuad}`
+          );
+        }
+        const chase = document.querySelector('#chasecam');
+        if (chase) {
+          chase.setAttribute(
+            'chase-camera',
+            `target: #car; dist: ${P.chaseCam.dist}; height: ${P.chaseCam.height}; stiffness: ${P.chaseCam.stiffness}; lookAhead: ${P.chaseCam.lookAhead}`
+          );
+        }
+        console.log('[PARAMS] applied:', P);
+      }
+
+      document.addEventListener('DOMContentLoaded', () => {
+        const sceneEl = document.querySelector('a-scene');
+        if (sceneEl) {
+          if (sceneEl.hasLoaded) applyParams();
+          else sceneEl.addEventListener('loaded', applyParams, { once: true });
+        }
+      });
+    </script>
+    <!-- ▲ 一元パラメータ ▲ -->
+
+    <!-- ▼ アーケード式 car-drive（床摩擦＋空気抵抗付き） ▼ -->
     <script>
       AFRAME.registerComponent('car-drive', {
         schema: {
-          thrust: { default: 1800 },
-          turn: { default: 1.2 },
-          maxSpeed: { default: 16 },
-          drag: { default: 0.4 },
+          forwardSign: { default: +1 }, // +1=+Z前 / -1=−Z前（W/Sが逆ならここを変更）
+          maxSpeed: { default: 25 }, // m/s
+          accel: { default: 5 }, // m/s^2
+          brake: { default: 7 }, // m/s^2
+          coastDecel: { default: 0.0 }, // m/s^2（任意）
+          yawRate: { default: 3.2 }, // rad/s（A左+, D右-）
+          yawSlew: { default: 40 }, // rad/s^2（角速度の変化上限）
+          deadbandV: { default: 0.05 }, // m/s
+          deadbandW: { default: 0.02 }, // rad/s
+          muRoll: { default: 0.5 }, // （床）転がり抵抗係数
+          airLin: { default: 0.05 }, // （空気）線形項 [1/s]
+          airQuad: { default: 0.02 }, // （空気）二乗項 [1/m]
         },
-        init() {
-          this.keys = {};
-          const down = (e) => {
-            const k = e.code || (e.key && 'Key' + e.key.toUpperCase());
-            this.keys[k] = true;
-          };
-          const up = (e) => {
-            const k = e.code || (e.key && 'Key' + e.key.toUpperCase());
-            this.keys[k] = false;
-          };
-          // 取りこぼし低減（capture）
-          window.addEventListener('keydown', down, true);
-          window.addEventListener('keyup', up, true);
-          document.addEventListener('keydown', down, true);
-          document.addEventListener('keyup', up, true);
-          // フォーカス喪失でキー状態をクリア
-          window.addEventListener(
-            'blur',
-            () => {
-              this.keys = {};
-            },
-            true
-          );
 
-          this.tmpForce = new CANNON.Vec3();
-          this.dir3 = new THREE.Vector3();
-          this.q = new THREE.Quaternion();
+        init() {
+          // 入力
+          this.keys = {};
+          this._down = (e) => {
+            const k = e.code;
+            if (k === 'KeyW' || k === 'KeyA' || k === 'KeyS' || k === 'KeyD') {
+              this.keys[k] = true;
+              e.preventDefault();
+            }
+          };
+          this._up = (e) => {
+            const k = e.code;
+            if (k === 'KeyW' || k === 'KeyA' || k === 'KeyS' || k === 'KeyD') {
+              this.keys[k] = false;
+              e.preventDefault();
+            }
+          };
+          this._blur = () => {
+            this.keys = {};
+          };
+          this._vis = () => {
+            if (document.hidden) this._blur();
+          };
+          this._attached = false;
+
+          // 内部状態
+          this._yaw = this.el.object3D.rotation.y; // 現在のヨー角[rad]
+          this._omega = 0; // 角速度[rad/s]
+          this._speed = 0; // 前後速度[m/s]
+
+          // 作業
+          this._q = new THREE.Quaternion();
+          this._fwd = new THREE.Vector3(0, 0, 1); // forwardSignで符号は後で切替
+
+          const attach = () => this._attachListeners();
+          const scene = this.el.sceneEl;
+          if (scene?.hasLoaded) attach();
+          else scene.addEventListener('loaded', attach, { once: true });
         },
+
+        play() {
+          this._attachListeners();
+        },
+        pause() {
+          this._detachListeners();
+        },
+        remove() {
+          this._detachListeners();
+        },
+
+        _attachListeners() {
+          if (this._attached) return;
+          window.addEventListener('keydown', this._down, true);
+          window.addEventListener('keyup', this._up, true);
+          window.addEventListener('blur', this._blur, true);
+          document.addEventListener('visibilitychange', this._vis, true);
+          this._attached = true;
+        },
+        _detachListeners() {
+          if (!this._attached) return;
+          window.removeEventListener('keydown', this._down, true);
+          window.removeEventListener('keyup', this._up, true);
+          window.removeEventListener('blur', this._blur, true);
+          document.removeEventListener('visibilitychange', this._vis, true);
+          this._attached = false;
+        },
+
         tick(t, dtms) {
           const body = this.el.body;
           if (!body) return;
+
           const dt = Math.min(dtms / 1000, 0.05);
+          const P = this.data;
+          const g = 9.8;
 
-          // 入力があればスリープ解除
-          if (this.keys['KeyW'] || this.keys['KeyS'] || this.keys['KeyA'] || this.keys['KeyD'])
-            body.wakeUp();
+          // 入力
+          const w = !!this.keys.KeyW,
+            s = !!this.keys.KeyS;
+          const a = !!this.keys.KeyA,
+            d = !!this.keys.KeyD;
+          if (w || s || a || d) body.wakeUp();
 
-          const fwdSign = (this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0);
-          const yawSign = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
-          const speed = body.velocity.length();
+          // ── 角速度：A左(+), D右(−) をスルーレート付きで反映 ──
+          const omegaTarget = P.yawRate * ((a ? 1 : 0) - (d ? 1 : 0));
+          const slew = P.yawSlew * dt;
+          const dOmega = THREE.MathUtils.clamp(omegaTarget - this._omega, -slew, +slew);
+          this._omega += dOmega;
+          if (Math.abs(this._omega) < P.deadbandW) this._omega = 0;
 
-          // 前進・後退（前＝ローカル −Z をクォータニオンから算出）
-          if (fwdSign !== 0 && speed < this.data.maxSpeed + 0.5) {
-            this.el.object3D.getWorldQuaternion(this.q);
-            // ローカル −Z を世界へ。水平面に投影して微小の上下成分は無視してもよい
-            this.dir3.set(0, 0, -1).applyQuaternion(this.q);
-            this.dir3.set(this.dir3.x, 0, this.dir3.z).normalize();
-            this.tmpForce.set(this.dir3.x, this.dir3.y, this.dir3.z);
-            this.tmpForce.scale(this.data.thrust * fwdSign, this.tmpForce);
-            body.applyForce(this.tmpForce, body.position); // 作用点＝質量中心
-          }
+          // ヨー角の積分→姿勢（Yawのみ）
+          this._yaw += this._omega * dt;
+          this._q.setFromEuler(new THREE.Euler(0, this._yaw, 0, 'YXZ'));
+          body.quaternion.set(this._q.x, this._q.y, this._q.z, this._q.w);
 
-          // 旋回（ヨー）。D=右（時計回り）が負、A=左（反時計回り）が正
-          body.angularVelocity.y = -this.data.turn * yawSign;
+          // 物理の角速度は使わないので抑制
+          body.angularVelocity.set(0, 0, 0);
 
-          // 抗力：F = -k v
-          this.tmpForce.set(body.velocity.x, body.velocity.y, body.velocity.z);
-          this.tmpForce.scale(-this.data.drag, this.tmpForce);
-          body.applyForce(this.tmpForce, body.position);
+          // ── 前後加速度：入力 ± 摩擦 ＋ 空気抵抗 ──
+          // 入力加速度
+          let aCmd = 0;
+          if (w && !s) aCmd = +P.accel;
+          else if (s && !w) aCmd = -P.brake;
+          else aCmd = 0;
+
+          // 抵抗（進行方向と逆向き）
+          const signV = Math.sign(this._speed) || 0;
+          const aRoll = -signV * (P.muRoll * g); // 床
+          const aAir =
+            -signV *
+            (P.airLin * Math.abs(this._speed) + // 空気：線形
+              P.airQuad * (this._speed * this._speed)); // 空気：二乗
+
+          // 惰性減速（任意）：押していない時だけ加える
+          const aCoast = !w && !s && P.coastDecel > 0 ? -signV * P.coastDecel : 0;
+
+          // 合成加速度
+          const aTotal = aCmd + aRoll + aAir + aCoast;
+
+          // 速度更新＆クランプ
+          this._speed += aTotal * dt;
+          this._speed = THREE.MathUtils.clamp(this._speed, -P.maxSpeed, P.maxSpeed);
+          if (Math.abs(this._speed) < P.deadbandV) this._speed = 0;
+
+          // ── 前方ベクトル（水平） ──
+          // forwardSign = +1 ならローカル+Zが前、-1 なら −Z が前
+          this._fwd.set(0, 0, P.forwardSign).applyQuaternion(this._q);
+          this._fwd.y = 0;
+          if (this._fwd.lengthSq() > 0) this._fwd.normalize();
+
+          // ── 速度を“前後方向のみ”に設定（横滑りゼロ） ──
+          const vy = body.velocity.y; // 垂直は物理任せ
+          body.velocity.x = this._fwd.x * this._speed;
+          body.velocity.z = this._fwd.z * this._speed;
+          body.velocity.y = vy;
         },
       });
     </script>
+    <!-- ▲ アーケード式 car-drive ▲ -->
 
-    <!-- 追従カメラ：後方固定 + 世界Y+で安定化 + 車自身を注視 -->
+    <!-- 追従カメラ -->
     <script>
       AFRAME.registerComponent('chase-camera', {
         schema: {
           target: { type: 'selector' },
-          dist: { default: 9 },
-          height: { default: 5.5 },
-          stiffness: { default: 4 },
-          lookAhead: { default: 0 },
+          dist: { default: -3 },
+          height: { default: 3.5 },
+          stiffness: { default: 12 },
+          lookAhead: { default: 0.45 },
         },
         init() {
           this.pos = new THREE.Vector3();
           this.q = new THREE.Quaternion();
           this.fwd = new THREE.Vector3();
           this.back = new THREE.Vector3();
-          this.up = new THREE.Vector3();
+          this.up = new THREE.Vector3(0, 1, 0);
           this.des = new THREE.Vector3();
           this.look = new THREE.Vector3();
         },
@@ -105,25 +274,19 @@
           if (!tgt) return;
           tgt.getWorldPosition(this.pos);
           tgt.getWorldQuaternion(this.q);
-
           const fwd = this.fwd.set(0, 0, -1).applyQuaternion(this.q).normalize();
           const back = this.back.copy(fwd).negate();
-          const up = this.up.set(0, 1, 0); // 世界Y+
-
           this.des
             .copy(this.pos)
-            .addScaledVector(up, this.data.height)
+            .addScaledVector(this.up, this.data.height)
             .addScaledVector(back, this.data.dist);
-
           this.look
             .copy(this.pos)
-            .addScaledVector(up, 0.6) // まずは車そのもの
+            .addScaledVector(this.up, 0.6)
             .addScaledVector(fwd, this.data.lookAhead);
-
-          const dt = Math.min(dtms / 1000, 0.05);
-          const alpha = 1 - Math.exp(-this.data.stiffness * dt);
-          this.el.object3D.position.lerp(this.des, alpha);
-
+          const dt = Math.min(dtms / 1000, 0.05),
+            a = 1 - Math.exp(-this.data.stiffness * dt);
+          this.el.object3D.position.lerp(this.des, a);
           const camObj = this.el.getObject3D('camera') || this.el.object3D;
           camObj.up.set(0, 1, 0);
           camObj.lookAt(this.look);
@@ -150,12 +313,13 @@
   </head>
 
   <body>
-    <!-- E-Stop -->
     <button id="eStopButton">E-Stop</button>
-    <div id="logHint">C: カメラ切替／L: 位置を1回ログ</div>
+    <button id="dlLog" style="position: absolute; top: 80px; right: 10px; z-index: 1000">
+      DL diag.csv
+    </button>
+    <div id="logHint">C: カメラ切替／L: 位置ログ／V: 速度ログ</div>
 
     <a-scene physics="driver: local; debug: true; gravity: -9.8">
-      <!-- アセット -->
       <a-assets>
         <a-asset-item
           id="carModel"
@@ -163,20 +327,20 @@
         ></a-asset-item>
       </a-assets>
 
-      <!-- ライティング -->
+      <!-- ライト -->
       <a-entity light="type: ambient; intensity: 0.6"></a-entity>
       <a-entity light="type: directional; intensity: 1.0" position="1 3 2"></a-entity>
 
-      <!-- 追従カメラ（fov広め、look-controls無効） -->
+      <!-- 追従カメラ -->
       <a-entity
         id="chasecam"
         camera="active: true; near: 0.01; far: 2000; fov: 90"
         look-controls="enabled: false"
-        chase-camera="target: #car; dist: 5; height: 3.5; stiffness: 4; lookAhead: 0"
+        chase-camera="target: #car; dist: -3; height: 3.5; stiffness: 12; lookAhead: 0.45"
       >
       </a-entity>
 
-      <!-- デバッグカメラ（Cで切替） -->
+      <!-- デバッグカメラ -->
       <a-entity
         id="debugcam"
         camera="active: false"
@@ -190,22 +354,22 @@
         rotation="-90 0 0"
         width="80"
         height="80"
-        color="#cccccc"
+        color="#ccc"
         static-body="shape: plane"
       ></a-plane>
       <a-sky color="#ECECEC"></a-sky>
 
-      <!-- 車（ラッパー＝物理主体 / 子＝見た目） -->
+      <!-- 車 -->
       <a-entity
         id="car"
         position="0 1.0 -4"
         rotation="0 0 0"
-        dynamic-body="shape: box; mass: 120; linearDamping: 0.4; angularDamping: 0.9; type: dynamic"
-        car-drive="thrust:1800; drag:0.4; turn:1.2; maxSpeed:16"
+        dynamic-body="shape: box; mass: 120; linearDamping: 0.1; angularDamping: 1.0; type: dynamic"
+        car-drive="forwardSign:1; maxSpeed:25; accel:10; brake:12; coastDecel:0; yawRate:3.2; yawSlew:40; deadbandV:0.05; deadbandW:0.02; muRoll:0.02; airLin:0.05; airQuad:0.02"
       >
         <a-entity
           id="carModelNode"
-          rotation="0 180 0"
+          rotation="0 0 0"
           gltf-model="#carModel"
           scale="0.5 0.5 0.5"
         ></a-entity>
@@ -213,7 +377,7 @@
     </a-scene>
 
     <script>
-      // シーン読み込み完了後に canvas フォーカス設定（AFRAME.scenes[0] 未定義エラー対策）
+      // Canvas フォーカス
       document.addEventListener('DOMContentLoaded', () => {
         const sceneEl = document.querySelector('a-scene');
         if (!sceneEl) return;
@@ -226,23 +390,20 @@
         });
       });
 
-      // ログ & 初期化
+      // Body 調整（Yaw 以外ロック）＋ 再生成時の再適用
       const carEl = document.querySelector('#car');
-      const modelEl = document.querySelector('#carModelNode');
-
-      modelEl.addEventListener('model-loaded', (e) => console.log('[OK] model loaded:', e.detail));
-      modelEl.addEventListener('model-error', (e) =>
-        console.error('[ERR] model:', e.detail?.src, e.detail?.error)
-      );
-
-      carEl.addEventListener(
-        'body-loaded',
-        () => {
-          console.log('[OK] body created:', carEl.body);
-          carEl.body.allowSleep = false;
-        },
-        { once: true }
-      );
+      const applyAngularFactor = () => {
+        const b = carEl.body;
+        if (b) {
+          b.allowSleep = false;
+          const af = window.PARAMS.angularFactor || { x: 0, y: 1, z: 0 };
+          b.angularFactor.set(af.x, af.y, af.z); // pitch/roll禁止, yawのみ許可
+        }
+      };
+      carEl.addEventListener('body-loaded', applyAngularFactor, { once: true });
+      carEl.addEventListener('componentchanged', (e) => {
+        if (e.detail.name === 'dynamic-body') applyAngularFactor();
+      });
 
       // E-Stop
       document.getElementById('eStopButton').addEventListener('click', (e) => {
@@ -254,34 +415,134 @@
         e.target.blur();
       });
 
-      // C: 追従 <-> デバッグ カメラ切替
+      // C / L / V（簡易デバッグ）
       window.addEventListener(
         'keydown',
         (e) => {
-          if (e.code !== 'KeyC') return;
-          const chase = document.querySelector('#chasecam');
-          const debug = document.querySelector('#debugcam');
-          const useDebug = !debug.getAttribute('camera').active;
-          debug.setAttribute('camera', 'active:' + useDebug);
-          chase.setAttribute('camera', 'active:' + !useDebug);
-          console.log('camera:', useDebug ? 'debug' : 'chase');
+          if (e.code === 'KeyC') {
+            const chase = document.querySelector('#chasecam');
+            const debug = document.querySelector('#debugcam');
+            const useDebug = !debug.getAttribute('camera').active;
+            debug.setAttribute('camera', 'active:' + useDebug);
+            chase.setAttribute('camera', 'active:' + !useDebug);
+            console.log('camera:', useDebug ? 'debug' : 'chase');
+          }
+          if (e.code === 'KeyL') {
+            const pCar = new THREE.Vector3(),
+              pCam = new THREE.Vector3();
+            carEl.object3D.getWorldPosition(pCar);
+            document.querySelector('#chasecam').object3D.getWorldPosition(pCam);
+            console.log(
+              '[L] car:',
+              pCar,
+              ' cam:',
+              pCam,
+              ' dist:',
+              pCar.distanceTo(pCam).toFixed(3)
+            );
+          }
+          if (e.code === 'KeyV') {
+            const b = carEl.components['dynamic-body']?.body;
+            if (b)
+              console.log(
+                '[V] speedH=',
+                Math.hypot(b.velocity.x, b.velocity.z).toFixed(2),
+                ' vel=',
+                b.velocity
+              );
+          }
         },
         true
       );
+    </script>
 
-      // L: 車と追従カメラの位置を1回だけログ
-      function onKeyOnce(e) {
-        if (e.code !== 'KeyL') return;
-        window.removeEventListener('keydown', onKeyOnce, true);
-        const carO3 = carEl.object3D,
-          camO3 = document.querySelector('#chasecam').object3D;
-        const pCar = new THREE.Vector3(),
-          pCam = new THREE.Vector3();
-        carO3.getWorldPosition(pCar);
-        camO3.getWorldPosition(pCam);
-        console.log('[L] car:', pCar, ' cam:', pCam, ' dist(m):', pCar.distanceTo(pCam).toFixed(3));
-      }
-      window.addEventListener('keydown', onKeyOnce, true);
+    <!-- 簡易CSVロガー（そのまま） -->
+    <script>
+      AFRAME.registerComponent('diag-logger', {
+        init() {
+          this.right = new THREE.Vector3();
+          this.dir3 = new THREE.Vector3();
+          this.fwdH = new THREE.Vector3();
+          window.__diag = [['sec', 'W', 'A', 'S', 'D', 'vF', 'vLat', 'yaw', 'speedH']];
+          this.last = 0;
+          this.eps = { speed: 0.05, yaw: 0.02, comp: 0.02 };
+          this.prev = null;
+        },
+        tick(t, dt) {
+          if (t - this.last < 100) return; // 10Hz
+          this.last = t;
+          const body = this.el.body;
+          if (!body) return;
+
+          this.el.object3D.getWorldDirection(this.dir3);
+          this.fwdH.set(this.dir3.x, 0, this.dir3.z).normalize();
+          const vH = new THREE.Vector3(body.velocity.x, 0, body.velocity.z);
+          const vF = vH.dot(this.fwdH);
+          const rightH = this.right
+            .copy(this.fwdH)
+            .cross(new THREE.Vector3(0, 1, 0))
+            .normalize();
+          const vLat = vH.dot(rightH);
+          const keys = this.el.components['car-drive']?.keys || {};
+          const yaw = body.angularVelocity.y; // アーケード式ではほぼ0
+          const speedH = vH.length();
+
+          const anyKey = !!(keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD);
+          const isStopped =
+            !anyKey &&
+            speedH < this.eps.speed &&
+            Math.abs(yaw) < this.eps.yaw &&
+            Math.abs(vLat) < this.eps.comp &&
+            Math.abs(vF) < this.eps.comp;
+          if (isStopped) return;
+
+          const row = {
+            sec: (t / 1000).toFixed(3),
+            W: +!!keys.KeyW,
+            A: +!!keys.KeyA,
+            S: +!!keys.KeyS,
+            D: +!!keys.KeyD,
+            vF,
+            vLat,
+            yaw,
+            speedH,
+          };
+          if (this.prev) {
+            const sameKeys =
+              row.W === this.prev.W &&
+              row.A === this.prev.A &&
+              row.S === this.prev.S &&
+              row.D === this.prev.D;
+            const diffSmall =
+              Math.abs(row.vF - this.prev.vF) < this.eps.comp &&
+              Math.abs(row.vLat - this.prev.vLat) < this.eps.comp &&
+              Math.abs(row.yaw - this.prev.yaw) < this.eps.yaw &&
+              Math.abs(row.speedH - this.prev.speedH) < this.eps.speed;
+            if (sameKeys && diffSmall) return;
+          }
+          window.__diag.push([
+            row.sec,
+            row.W,
+            row.A,
+            row.S,
+            row.D,
+            row.vF.toFixed(3),
+            row.vLat.toFixed(3),
+            row.yaw.toFixed(3),
+            row.speedH.toFixed(3),
+          ]);
+          this.prev = row;
+        },
+      });
+
+      document.getElementById('dlLog').addEventListener('click', () => {
+        const csv = window.__diag.map((r) => r.join(',')).join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'diag.csv';
+        a.click();
+      });
     </script>
   </body>
 </html>
