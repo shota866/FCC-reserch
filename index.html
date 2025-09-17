@@ -28,7 +28,7 @@
           yawSlew: 40,
           deadbandV: 0.05,
           deadbandW: 0.02,
-          muRoll: 0.1,
+          muRoll: 0.005,
           airLin: 0.1,
           airQuad: 0.1,
         },
@@ -77,6 +77,69 @@
       });
     </script>
     <!-- ▲ 一元パラメータ ▲ -->
+    <!-- ▼ Delaunay Triangulation ライブラリ ▼ -->
+    <script src="https://cdn.jsdelivr.net/npm/delaunator@5.0.0/delaunator.min.js"></script>
+
+    <!-- ▼ 点群表示用カスタムコンポーネント ▼ -->
+    <script>
+      AFRAME.registerComponent('xyz-point-cloud', {
+        schema: {
+          src: { type: 'asset' },
+          color: { type: 'color', default: '#333' },
+          wireframe: { type: 'boolean', default: true },
+        },
+
+        init: function () {
+          this.loader = new THREE.FileLoader();
+        },
+
+        update: function (oldData) {
+          const data = this.data;
+          if (data.src && data.src !== oldData.src) {
+            this.loader.load(data.src, (text) => {
+              const mesh = this.parseXyzToMesh(text);
+              this.el.setObject3D('mesh', mesh); // 'mesh'というキーでオブジェクトをセット
+              console.log('[xyz-point-cloud] Point cloud loaded and mesh generated.');
+            });
+          }
+        },
+
+        parseXyzToMesh: function (text) {
+          const data = this.data;
+          const lines = text.trim().split('\n');
+          const vertices = [];
+          const points2d = []; // For 2D Delaunay triangulation
+
+          lines.forEach((line) => {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 3) {
+              const x = parseFloat(parts[0]);
+              const y = parseFloat(parts[1]);
+              const z = parseFloat(parts[2]);
+              vertices.push(x, y, z);
+              points2d.push([x, y]); // Use X and Y for 2D triangulation
+            }
+          });
+
+          // Perform 2D Delaunay triangulation on the XY plane
+          const delaunay = Delaunator.from(points2d);
+          const indices = delaunay.triangles;
+
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+          geometry.setIndex(Array.from(indices));
+          geometry.computeVertexNormals(); // Important for lighting and physics
+
+          const material = new THREE.MeshStandardMaterial({
+            color: new THREE.Color(data.color),
+            wireframe: data.wireframe, // trueにするとワイヤーフレームで形状を確認できます
+            side: THREE.DoubleSide, // 物理演算のために両面を描画
+          });
+          return new THREE.Mesh(geometry, material);
+        },
+      });
+    </script>
+    <!-- ▲ 点群表示用カスタムコンポーネント ▲ -->
 
     <style>
       #eStopButton {
@@ -100,6 +163,8 @@
           id="carModel"
           src="assets/kenney_car-kit/Models/GLB format/sedan.glb"
         ></a-asset-item>
+        <!-- ▼ 点群ファイルを追加 ▼ -->
+        <a-asset-item id="pointCloudData" src="assets/MapViewer3Dpts_out.xyz"></a-asset-item>
       </a-assets>
 
       <!-- ライト -->
@@ -123,6 +188,13 @@
         position="0 1.6 8"
       ></a-entity>
 
+      <!-- ▼ 点群を表示するエンティティ ▼ -->
+      <a-entity
+        xyz-point-cloud="src: #pointCloudData; color: #555; wireframe: false"
+        static-body="shape: mesh"
+        rotation="-90 0 0"
+      ></a-entity>
+
       <!-- 地面 & 空 -->
       <a-plane
         rotation="-90 0 0"
@@ -136,7 +208,7 @@
       <!-- 車 -->
       <a-entity
         id="car"
-        position="0 1.0 -4"
+        position="0 2.0 -4"
         rotation="0 0 0"
         dynamic-body="shape: box; mass: 120; linearDamping: 0.1; angularDamping: 1.0; type: dynamic"
         car-drive="forwardSign:1; maxSpeed:25; accel:10; brake:12; coastDecel:0; yawRate:3.2; yawSlew:40; deadbandV:0.05; deadbandW:0.02; muRoll:0.02; airLin:0.05; airQuad:0.02"
